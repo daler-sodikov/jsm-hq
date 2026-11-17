@@ -48,6 +48,7 @@ const HOOKLESS_DIALOG = /Enter to select|↑\/↓ (to )?navigate/i;
 // Questions those TUIs ask: folder trust, yes/no and approve prompts.
 const HOOKLESS_ASK = /do you trust|trust this (folder|directory)|\(y\/n\)|\[y\/n\]|\bapprove\b.*\?|allow (once|always)/i;
 const HOOKLESS_SETTLE_MS = 6000; // a screen still this long (two polls) = the agent is at its prompt
+const HOOKLESS_BUSY_STALE_MS = 30_000; // …or this long when it shows a busy footer
 const STALE_WORKING_MS = 15_000; // "working" with an idle screen this long = a missed Stop
 
 /** Starts bash (else sh) in a sandbox, with links and browser opening set up (see SHELL_ENV, SANDBOX_BROWSER). */
@@ -548,7 +549,9 @@ export class Sessions {
       }
       return;
     }
-    if (HOOKLESS_BUSY.test(tail)) {
+    // A busy footer counts until the screen has been still for a long time: a running turn keeps
+    // changing it (spinner, timer, output), so a footer frozen that long is an idle screen's hint.
+    if (HOOKLESS_BUSY.test(tail) && stableMs < HOOKLESS_BUSY_STALE_MS) {
       if (st.state !== "working") set("working", "Working");
       return;
     }
