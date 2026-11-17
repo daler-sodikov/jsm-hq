@@ -25,6 +25,7 @@ import {
   writeHqToolScript,
 } from "./agentFiles";
 import { run, shq } from "./lib/exec";
+import { resolveCommand } from "./backends/pty";
 
 export interface Launch {
   /** Agent for `sbx run`: a built-in kit ("claude", "codex", "opencode"), or "shell" with sandboxScript. */
@@ -197,9 +198,21 @@ export function openCodeConfig(agent: AgentConfig, cfg: HqConfig, token: string,
  */
 let openCodeStandalone: boolean | null = null;
 async function hasStandaloneFlag(): Promise<boolean> {
-  openCodeStandalone ??= (await run("opencode", ["--help"], { timeoutMs: 8000 })).stdout.includes("--standalone");
-  return openCodeStandalone;
+  if (openCodeStandalone !== null) return openCodeStandalone;
+  try {
+    // Resolved like the launch (on Windows npm installs opencode.cmd, which execFile can't run directly).
+    const { file, args } = await resolveCommand("opencode", ["--help"]);
+    const help = await run(file, args, { timeoutMs: 8000 });
+    // Only a probe that ran is remembered; a failed one is tried again on the next start.
+    if (help.ok) openCodeStandalone = help.stdout.includes("--standalone");
+    return help.ok && help.stdout.includes("--standalone");
+  } catch {
+    return false; // not on PATH
+  }
 }
+
+/** The probe's answer for each agent's latest start (writeFiles runs just before launch). */
+const standaloneFor = new Map<string, boolean>();
 
 function openCodeLike(cli: "opencode" | "kilo", file: string, schema: string): CliAdapter {
   return {
@@ -208,11 +221,11 @@ function openCodeLike(cli: "opencode" | "kilo", file: string, schema: string): C
       await writeRole(dir, agent, cfg, extras);
       agentWrite(dir, file, openCodeConfig(agent, cfg, token, schema), { mode: 0o600 });
       excludeFromGit(dir, [ROLE_FILE, file]);
-      if (cli === "opencode" && agent.mode === "local") await hasStandaloneFlag();
+      if (cli === "opencode" && agent.mode === "local") standaloneFor.set(agent.id, await hasStandaloneFlag());
     },
     launch(agent) {
       // In a sandbox the VM has its own OpenCode, and the kit decides how it runs.
-      if (cli === "opencode") return { sbxAgent: "opencode", args: agent.mode === "local" && openCodeStandalone ? ["--standalone"] : [] };
+      if (cli === "opencode") return { sbxAgent: "opencode", args: agent.mode === "local" && standaloneFor.get(agent.id) ? ["--standalone"] : [] };
       return shellLaunch(agent, { cli, install: npmInstall("@kilocode/cli"), args: [] });
     },
   };
@@ -275,6 +288,7 @@ export function clineMcpConfig(agent: AgentConfig, cfg: HqConfig, token: string)
 
 const cline: CliAdapter = {
   async writeFiles(dir, agent, cfg, token, extras = {}) {
+    await refuseTracked(dir, CLINE_MCP, "cline");
     await writeRole(dir, agent, cfg, extras);
     agentWrite(dir, CLINE_MCP, clineMcpConfig(agent, cfg, token), { mode: 0o600 });
     excludeFromGit(dir, [ROLE_FILE, CLINE_MCP]);

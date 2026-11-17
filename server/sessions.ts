@@ -42,6 +42,9 @@ const PROMPT_READY = /⏵⏵|\? for shortcuts|Ask Codex to do anything/; // the 
 const SCREEN_QUIET_MS = 4000; // only second-guess hooks after this much silence
 // CLIs without hooks. Busy footers across TUIs ("esc to interrupt", "esc interrupt", "ctrl+c to cancel"…).
 const HOOKLESS_BUSY = /esc to (interrupt|cancel|stop)|\besc interrupt\b|press esc to (stop|cancel)|ctrl\+c to (interrupt|cancel|stop)/i;
+// A menu waiting for a choice, told by its key hints ("↑/↓ navigate, Enter to select"), which the agent's
+// own prose doesn't print. DIALOG's wording ("Would you like to", "› 1.") would also match ordinary output.
+const HOOKLESS_DIALOG = /Enter to select|↑\/↓ (to )?navigate/i;
 // Questions those TUIs ask: folder trust, yes/no and approve prompts.
 const HOOKLESS_ASK = /do you trust|trust this (folder|directory)|\(y\/n\)|\[y\/n\]|\bapprove\b.*\?|allow (once|always)/i;
 const HOOKLESS_SETTLE_MS = 6000; // a screen still this long (two polls) = the agent is at its prompt
@@ -93,6 +96,9 @@ export class Sessions {
     const agent = hub.cfg(id);
     const st = hub.status(id);
     if (!agent || !st || st.session.state === "running" || st.session.state === "starting") return;
+    // Choosing a CLI for Local mode re-runs the setup checks in the background. If its check isn't in
+    // yet, wait for it instead of reporting the CLI as missing.
+    if (agent.mode === "local" && !hub.snap.setup.checks.some((c) => c.id === agent.cli)) await this.recheckSetup();
     const setup = hub.snap.setup;
     const fail = (detail: string) => {
       hub.setSession(id, { state: "failed", detail });
@@ -417,7 +423,8 @@ export class Sessions {
           if (st.session.state !== "running") {
             this.hub.setSession(agent.id, { state: "running", detail: null, workspace: workspaceFor(agent, this.hub.slug) });
             this.hub.setStatus(agent.id, { note: "Reattached" });
-            this.onSessionReattached(agent.id);
+            // Without hooks, only a settled screen says the prompt is up (reconcileHookless marks it then).
+            if (CLI_INFO[agent.cli].hooks) this.onSessionReattached(agent.id);
           }
           if (!CLI_INFO[agent.cli].hooks) {
             await this.reconcileHookless(agent.id, name);
@@ -534,14 +541,18 @@ export class Sessions {
       this.hub.setStatus(agentId, { state, note });
     };
 
-    if (DIALOG.test(tail) || HOOKLESS_ASK.test(tail)) {
+    if (HOOKLESS_DIALOG.test(tail) || HOOKLESS_ASK.test(tail)) {
       if (st.state !== "needs-input") {
         set("needs-input", "Asking: answer the question in the terminal");
         this.hub.activity("agent.needs-input", agentId, `${this.hub.name(agentId)} needs you in the terminal`);
       }
       return;
     }
-    if (HOOKLESS_BUSY.test(tail) || stableMs < HOOKLESS_SETTLE_MS) {
+    if (HOOKLESS_BUSY.test(tail)) {
+      if (st.state !== "working") set("working", "Working");
+      return;
+    }
+    if (stableMs < HOOKLESS_SETTLE_MS) {
       // The first look only records the screen: nothing to compare it with yet.
       if (prev && st.state !== "working") set("working", "Working");
       return;
